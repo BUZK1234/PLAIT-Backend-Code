@@ -9,6 +9,7 @@ class AnalysisRequest(models.Model):
         ('queue', 'Queued'),
         ('completed', 'Completed'),
         ('failed', 'Failed'),
+        ('killed', 'Killed')
     )
 
     name = models.CharField(max_length=100)

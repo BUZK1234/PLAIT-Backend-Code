@@ -7,7 +7,7 @@ services:
     ports:
       - "6380:6379"
     volumes:
-      - ./redisdata:/data
+      - plait_host_db:/data
 
   web:
     build: .
@@ -17,6 +17,13 @@ services:
       - ./.env
     depends_on:
       - redis
+    volumes:
+      - plait_host_media:/media
+      - plait_host_db:/db.sqlite3
 
 networks:
   backend_network:
+
+volumes:
+  plait_host_media:
+  plait_host_db:

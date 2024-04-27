@@ -11,7 +11,6 @@ import json
 from .serializers import AnalysisRequestSerializer
 from django.http import FileResponse
 from json.decoder import JSONDecodeError
-from celery import shared_task
 from django.conf import settings
 import os
 from django.core.mail import EmailMessage
@@ -19,30 +18,30 @@ import threading
 import time
 from rest_framework.pagination import PageNumberPagination
 
+
 class TicketView(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
-    authentication_classes = [JWTAuthentication]
     parser_classes = [MultiPartParser]
-    monitoring_started = False  # Class-level variable to track if monitoring has started
 
     def __init__(self):
         self.running_threads = {}
-        self.running_threads_lock = threading.Lock()  # Lock for thread-safe access
+        self.running_threads_lock = threading.Lock()
         self.start_monitoring()
 
     def start_monitoring(self):
         try:
-            if not TicketView.monitoring_started:  # Check if monitoring has already started
-                # Start the thread monitoring function
-                thread = threading.Thread(target=self.monitor_threads)
-                thread.daemon = True  # Terminate when main thread exits
-                thread.start()
-                TicketView.monitoring_started = True  # Set monitoring flag to True
+            if not hasattr(self, 'monitoring_thread') or not self.monitoring_thread.is_alive():
+                print("Starting monitoring thread...")
+                self.monitoring_thread = threading.Thread(target=self.monitor_threads)
+                self.monitoring_thread.daemon = True
+                self.monitoring_thread.start()
+                print("Monitoring thread started.")
         except Exception as e:
             print(f"Error occurred while starting monitoring: {str(e)}")
 
     def create_ticket(self, request, format=None):
         try:
+            print("Creating ticket...")
             uploaded_file = request.FILES.get('file')
             name = request.data.get('name')
             description = request.data.get("description")
@@ -67,18 +66,27 @@ class TicketView(viewsets.ViewSet):
                     "statusCode": status.HTTP_200_OK,
                 })
 
-            # If no ticket is in progress, create the ticket with status 'progress'
-            analysis_request_obj = AnalysisRequest.objects.create(user=user, name=name, file=uploaded_file,
-                                                                  description=description, status='progress')
+            analysis_request_obj = AnalysisRequest.objects.create(
+                user=user,
+                name=name,
+                file=uploaded_file,
+                description=description,
+                status='progress'
+            )
 
-            # Start a thread for R script execution
             thread = threading.Thread(target=self.execute_r_script, args=(analysis_request_obj,))
+            start_time = time.time()  # Set start time here
             thread.start()
 
-            # Track the thread by ticket ID
             with self.running_threads_lock:
-                self.running_threads[analysis_request_obj.id] = thread
+                self.running_threads[analysis_request_obj.id] = {
+                    'thread': thread,
+                    'start_time': start_time,  # Pass start time to running_threads
+                    'process': None  # Placeholder for subprocess
+                }
+                print(f"Ticket created: {analysis_request_obj.id}")
 
+            print("Ticket created successfully.")
             return Response({
                 "statusMessage": "R code execution started",
                 "errorStatus": False,
@@ -97,43 +105,48 @@ class TicketView(viewsets.ViewSet):
 
     def execute_r_script(self, analysis_request_obj):
         try:
+            print("Executing R script...")
+            time.sleep(40)
             r_script_path = os.path.join(settings.BASE_DIR, 'Server', 'DBS_Call.R')
-            print(r_script_path)
-            time.sleep(30)
             process = Popen(
                 ['Rscript', r_script_path, analysis_request_obj.file.path, str(analysis_request_obj.id)],
                 stdout=PIPE, stderr=PIPE)
+
+            with self.running_threads_lock:
+                self.running_threads[analysis_request_obj.id]['process'] = process
+
             stdout, stderr = process.communicate()
             if process.returncode != 0:
                 print(f"R script execution failed with error: {stderr.decode()}")
                 analysis_request_obj.status = 'failed'
                 analysis_request_obj.save()
-                del self.running_threads[analysis_request_obj.id]
+                with self.running_threads_lock:
+                    del self.running_threads[analysis_request_obj.id]
+                self.start_queued_tickets_execution()
         except Exception as e:
             print(f"Error occurred while executing R script: {str(e)}")
 
     def monitor_threads(self):
         try:
-            # Check running threads periodically and terminate if exceeds time limit
+            print("Monitoring threads...")
             while True:
-                num_threads = len(self.running_threads)
-                print(f"Number of running threads: {num_threads}")
-                for ticket_id, thread in list(self.running_threads.items()):
-                    if thread.is_alive():
-                        # Check if the ticket has exceeded the time limit
-                        analysis_request_obj = AnalysisRequest.objects.get(id=ticket_id)
-                        if analysis_request_obj.status != 'killed':
-                            elapsed_time = time.time() - analysis_request_obj.created_at.timestamp()
-                            if elapsed_time > 60:  # If more than 60 seconds, mark ticket as killed
-                                analysis_request_obj.status = 'killed'
-                                analysis_request_obj.save()
-                                message = f"Ticket {ticket_id} has been killed due to exceeding the time limit."
-                                print(message)
-                                with self.running_threads_lock:
+                with self.running_threads_lock:
+                    for ticket_id, thread_info in list(self.running_threads.items()):
+                        thread = thread_info['thread']
+                        start_time = thread_info['start_time']
+                        if thread.is_alive():
+                            elapsed_time = time.time() - start_time
+                            if elapsed_time > 60:
+                                analysis_request_obj = AnalysisRequest.objects.get(id=ticket_id)
+                                if analysis_request_obj.status != 'killed':
+                                    analysis_request_obj.status = 'killed'
+                                    analysis_request_obj.save()
+                                    print(f"Ticket {ticket_id} has been killed due to exceeding the time limit.")
                                     del self.running_threads[ticket_id]
-                time.sleep(10)  # Check every 10 seconds
+                time.sleep(10)
         except Exception as e:
             print(f"Error occurred in thread monitoring: {str(e)}")
+
 
     def get_tickets(self, request):
         try:
@@ -196,6 +209,26 @@ class TicketView(viewsets.ViewSet):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    def start_queued_tickets_execution(self):
+        try:
+            analysis_request_obj = AnalysisRequest.objects.filter(status='queue').order_by('created_at').first()
+            if analysis_request_obj:
+                analysis_request_obj.status = 'progress'
+                analysis_request_obj.save()
+                thread = threading.Thread(target=self.execute_r_script, args=(analysis_request_obj,))
+                start_time = time.time()  # Set start time here
+                thread.start()
+
+                with self.running_threads_lock:
+                    self.running_threads[analysis_request_obj.id] = {
+                        'thread': thread,
+                        'start_time': start_time,  # Pass start time to running_threads
+                        'process': None  # Placeholder for subprocess
+                    }
+                    print(f"Ticket created: {analysis_request_obj.id}")
+        except Exception as e:
+            print(f"Error occurred while starting queued tickets execution: {str(e)}")
+
 class TicketResultsView(viewsets.ViewSet):
 
     def upload_results(self, request):
@@ -206,7 +239,6 @@ class TicketResultsView(viewsets.ViewSet):
             analysis_request = AnalysisRequest.objects.get(id=ticket_id)
             user_email = analysis_request.user.email
 
-            # Email the file to the user
             email_subject = 'Analysis Result'
             email_body = 'Please find attached the result of your analysis.'
             email = EmailMessage(email_subject, email_body, to=[user_email])
@@ -217,13 +249,9 @@ class TicketResultsView(viewsets.ViewSet):
             analysis_request.email_sent = True
             analysis_request.save()
             del self.running_threads[ticket_id]
-            analysis_request_obj = AnalysisRequest.objects.filter(status='queue').order_by('created_at').first()
-            if analysis_request_obj:
-                # Set the status of the ticket to 'progress'
-                analysis_request_obj.status = 'progress'
-                analysis_request_obj.save()
-                thread = threading.Thread(target=TicketView.execute_r_script, args=(analysis_request_obj,))
-                thread.start()
+
+            # Start executing queued tickets
+            TicketView().start_queued_tickets_execution()
 
             custom_response = {
                 "statusMessage": "File uploaded successfully",
@@ -248,3 +276,6 @@ class TicketResultsView(viewsets.ViewSet):
                 "statusCode": status.HTTP_500_INTERNAL_SERVER_ERROR,
             }
             return Response(custom_response)
+
+
+
