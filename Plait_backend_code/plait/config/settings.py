@@ -112,28 +112,6 @@ DATABASES = {
     }
 }
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'plait_db',
-#         'USER': 'plait_user',
-#         'PASSWORD': 'plait@1234',
-#         'HOST': 'localhost',
-#         'PORT': '5432',
-#     }
-# }
-
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': 'mydatabase1',
-#         'USER': 'myuser1',
-#         'PASSWORD': 'mypassword1',
-#         'HOST': 'postgres',  # This should match the name of the PostgreSQL service in Docker Compose
-#         'PORT': '5432',
-#     }
-# }
-
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
 AUTH_USER_MODEL = "User.CustomUser"

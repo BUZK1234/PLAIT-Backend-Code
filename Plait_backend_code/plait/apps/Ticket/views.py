@@ -106,8 +106,7 @@ class TicketView(viewsets.ViewSet):
     def execute_r_script(self, analysis_request_obj):
         try:
             print("Executing R script...")
-            time.sleep(40)
-            r_script_path = os.path.join(settings.BASE_DIR, 'Server', 'DBS_Call.R')
+            r_script_path = os.path.join(settings.BASE_DIR, os.getenv('R_FILE_PATH'))
             process = Popen(
                 ['Rscript', r_script_path, analysis_request_obj.file.path, str(analysis_request_obj.id)],
                 stdout=PIPE, stderr=PIPE)
